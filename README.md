@@ -6,12 +6,15 @@ Aplikasi berbagi file sederhana untuk mengirim & menerima file antar perangkat d
 
 ## ✨ Fitur
 
-- 📤 **Send** — kirim file via *drag & drop* atau pilih file, dapatkan kode unik untuk dibagikan.
-- 📥 **Receive** — masukkan kode untuk mengunduh file.
-- ⚡ **Upload streaming** — file besar tidak membebani RAM server (mendukung hingga 1 GB).
-- 🔑 **Kode unik 8 karakter** per file (tanpa karakter membingungkan).
-- ⏱️ **Auto-delete 1 jam** — file otomatis terhapus setelah kedaluwarsa.
-- 🛡️ **Rate limiting** — mencegah percobaan brute-force pada kode unduh.
+- 📤 **Send** — kirim banyak file sekaligus via *drag & drop* atau pilih file, dapatkan kode & QR untuk dibagikan.
+- 📥 **Receive** — terima file lewat kode, scan QR, atau tampilkan QR sendiri (dua arah).
+- 🔢 **Kode 6 digit** — gampang diketik di laptop atau disebut lewat telepon.
+- 📷 **Scan QR dalam halaman** — scan langsung dari kamera tanpa keluar aplikasi.
+- 🔄 **QR dua arah** — penerima bisa tampilkan QR sendiri, biar pengirim yang scan.
+- ✅ **Pilih file saat unduh** — checkbox per file + tombol "Pilih Semua".
+- ⚡ **Upload streaming** — file besar tidak membebani RAM server (mendukung hingga 1 GB per file).
+- 🛡️ **Anti-spam** — grace TTL, batas ukuran per IP, dan batas total storage.
+- 🚫 **Blokir ekstensi berbahaya** — menolak file executable/script saat upload.
 - 🔒 **Sanitasi nama file** — mencegah *path traversal*.
 - 🔐 **HTTPS** — lalu lintas terenkripsi (Let's Encrypt).
 
@@ -20,6 +23,8 @@ Aplikasi berbagi file sederhana untuk mengirim & menerima file antar perangkat d
 - **Backend:** Node.js + Express
 - **Upload streaming:** busboy
 - **Frontend:** HTML + CSS + JavaScript (tanpa framework)
+- **QR generator (client-side):** qrcode-generator (Kazuhiko Arase)
+- **QR scanner (client-side):** jsQR
 - **Deploy:** PM2 + Nginx (reverse proxy) + Certbot
 
 ## 📁 Struktur Proyek
@@ -28,7 +33,9 @@ Aplikasi berbagi file sederhana untuk mengirim & menerima file antar perangkat d
 dropit/
 ├── server.js            # Backend utama (Express)
 ├── public/
-│   └── index.html       # Frontend (send/receive)
+│   ├── index.html       # Frontend (send/receive)
+│   ├── qrcode.js        # Library generator QR (client-side)
+│   └── jsQR.js          # Library scanner QR (client-side)
 ├── uploads/             # Penyimpanan file (runtime, di-ignore git)
 ├── data/                # Metadata file (runtime, di-ignore git)
 ├── package.json
@@ -54,6 +61,8 @@ npm start
 
 Aplikasi berjalan di <http://localhost:8088>.
 
+> Catatan: fitur scan kamera (`getUserMedia`) butuh konteks aman (HTTPS atau `localhost`).
+
 ## ⚙️ Konfigurasi (Environment Variables)
 
 Semua pengaturan bisa diubah melalui environment variable:
@@ -61,8 +70,13 @@ Semua pengaturan bisa diubah melalui environment variable:
 | Variabel | Default | Keterangan |
 |---|---|---|
 | `PORT` | `8088` | Port aplikasi |
-| `MAX_FILE_SIZE` | `1073741824` (1 GB) | Maksimal ukuran file (byte) |
-| `TTL_MS` | `3600000` (1 jam) | Masa berlaku file (milidetik) |
+| `MAX_FILE_SIZE` | `1073741824` (1 GB) | Maksimal ukuran per file (byte) |
+| `MAX_BATCH_SIZE` | `5368709120` (5 GB) | Maksimal total ukuran per batch (byte) |
+| `MAX_FILES` | `50` | Maksimal jumlah file per batch |
+| `TTL_MS` | `3600000` (1 jam) | Masa simpan penuh setelah diakses (milidetik) |
+| `GRACE_TTL_MS` | `180000` (3 menit) | Masa tunggu sebelum file diakses (milidetik) |
+| `MAX_TOTAL_SIZE_PER_IP` | `524288000` (500 MB) | Batas total ukuran file aktif per IP (byte) |
+| `MAX_TOTAL_STORAGE` | `3221225472` (3 GB) | Batas total ukuran file aktif global (byte) |
 | `UPLOAD_DIR` | `./uploads` | Folder penyimpanan file |
 | `DATA_DIR` | `./data` | Folder penyimpanan metadata |
 
@@ -76,29 +90,38 @@ PORT=9000 MAX_FILE_SIZE=524288000 TTL_MS=86400000 npm start
 
 | Method | Endpoint | Keterangan |
 |---|---|---|
-| `POST` | `/api/upload` | Upload file (multipart, field `file`). Mengembalikan `code`. |
-| `GET` | `/api/info/:code` | Cek info file (nama, ukuran, kedaluwarsa) tanpa mengunduh. |
-| `GET` | `/api/download/:code` | Unduh file (streaming). |
+| `POST` | `/api/upload` | Upload satu atau banyak file (multipart, field `file`). Mengembalikan `code`. |
+| `GET` | `/api/info/:code` | Cek daftar file dalam batch (id, nama, ukuran, kedaluwarsa). |
+| `GET` | `/api/download/:code/:fileId` | Unduh satu file dalam batch (streaming). |
 | `GET` | `/api/health` | Health check. |
 
 ### Contoh alur
 
 ```bash
-# Upload
-curl -F "file=@dokumen.pdf" https://dropit.philipthamsir.dev/api/upload
-# => {"code":"Ab3xK9zL","fileName":"dokumen.pdf",...}
+# Upload banyak file
+curl -F "file=@dokumen.pdf" -F "file=@foto.jpg" https://dropit.philipthamsir.dev/api/upload
+# => {"code":"482913","fileCount":2,"files":[...]}
 
-# Unduh
-curl -O https://dropit.philipthamsir.dev/api/download/Ab3xK9zL
+# Lihat daftar file dalam batch
+curl https://dropit.philipthamsir.dev/api/info/482913
+# => {"code":"482913","files":[{"id":"abc123","fileName":"dokumen.pdf","size":...}, ...]}
+
+# Unduh satu file (pakai id dari response info)
+curl -O https://dropit.philipthamsir.dev/api/download/482913/abc123
 ```
 
-## 🔒 Keamanan
+## 🔒 Keamanan & Anti-spam
 
-- Kode acak 8 karakter (case-sensitive), sulit ditebak.
-- File & metadata kedaluwarsa otomatis (TTL 1 jam), dihapus tiap 1 menit oleh *cleanup job*.
-- Rate limiting pada endpoint upload & download.
-- Nama file disanitasi dan disimpan dengan nama acak di server.
-- File disimpan **di luar web root** sehingga tidak bisa diakses langsung via URL.
+- **Kode 6 digit** — gampang diketik; dilindungi rate limiting ketat agar tidak bisa di-brute-force.
+- **Grace TTL 3 menit** — file yang tidak pernah diakses otomatis terhapus dalam 3 menit.
+- **Perpanjang saat diakses** — begitu kode dibuka, masa simpan diperpanjang jadi 1 jam.
+- **Batas ukuran per IP (500 MB)** — total file aktif dari satu IP dibatasi.
+- **Batas total storage (3 GB)** — melindungi disk server agar tidak penuh.
+- **Rate limiting** pada endpoint upload, info, dan download.
+- **Blokir ekstensi berbahaya** (`.exe`, `.sh`, `.apk`, `.js`, dll.) saat upload.
+- **Sanitasi nama file** & disimpan dengan nama acak di server.
+- **File di luar web root** sehingga tidak bisa diakses langsung via URL.
+- **File tidak pernah dieksekusi** server-side (disimpan sebagai blob + dikirim `application/octet-stream`).
 
 ## 📦 Deploy ke VPS (PM2 + Nginx)
 
