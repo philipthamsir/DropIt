@@ -70,6 +70,21 @@ function sanitizeFilename(name) {
   return cleaned || 'file';
 }
 
+// Extensions that are risky to exchange (executables, scripts). Files are never
+// executed server-side, but these are commonly used to deliver malware to the
+// downloader, so we reject them at upload time.
+const BLOCKED_EXTENSIONS = new Set([
+  'exe', 'scr', 'bat', 'cmd', 'com', 'msi', 'ps1', 'vbs', 'vbe', 'js', 'jse',
+  'wsf', 'wsh', 'cpl', 'dll', 'jar', 'apk', 'app', 'deb', 'rpm', 'reg',
+  'lnk', 'sh', 'bash', 'zsh', 'fish', 'run', 'bin', 'pif', 'gadget', 'hta',
+]);
+
+function isBlockedFilename(name) {
+  const base = path.basename(String(name || ''));
+  const ext = base.includes('.') ? base.split('.').pop().toLowerCase() : '';
+  return BLOCKED_EXTENSIONS.has(ext);
+}
+
 // ---- Cleanup job: remove expired batches ----
 function cleanupExpired() {
   const now = Date.now();
@@ -130,6 +145,17 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
 
   bb.on('file', (fieldname, file, info) => {
     const originalName = sanitizeFilename(info.filename);
+
+    // Reject risky file types immediately (before writing to disk)
+    if (isBlockedFilename(info.filename)) {
+      aborted = true;
+      file.resume(); // drain the stream
+      req.unpipe(bb);
+      cleanupTemp(tempPaths);
+      res.status(415).json({ error: 'Tipe file "' + originalName + '" tidak diizinkan.' });
+      return;
+    }
+
     const fileId = crypto.randomBytes(6).toString('hex');
     const storedName = `${code}_${fileId}`;
     const filePath = path.join(UPLOAD_DIR, storedName);

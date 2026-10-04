@@ -148,6 +148,34 @@
     .hidden { display: none !important; }
     .footer { text-align: center; font-size: 12px; margin-top: 22px; font-weight: 800; color: #444; }
     .h2 { font-size: 24px; text-transform: uppercase; letter-spacing: -0.5px; }
+
+    /* Scan modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center; z-index: 100; padding: 20px;
+    }
+    .modal {
+      background: #fff; border: var(--border); border-radius: 4px;
+      box-shadow: 8px 8px 0 #111; padding: 24px; width: 100%; max-width: 420px; position: relative;
+    }
+    .modal h3 { font-size: 20px; text-transform: uppercase; margin-bottom: 12px; }
+    .modal .close {
+      position: absolute; top: 12px; right: 12px; background: var(--accent2);
+      border: 3px solid #111; color: #111; cursor: pointer; font-weight: 900;
+      width: 34px; height: 34px; font-size: 16px; box-shadow: 2px 2px 0 #111; font-family: inherit;
+    }
+    .scanner-box {
+      width: 100%; aspect-ratio: 1; background: #111; overflow: hidden;
+      border: 3px solid #111; position: relative; border-radius: 4px;
+    }
+    .scanner-box video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .scanner-box canvas { display: none; }
+    .scan-line {
+      position: absolute; left: 8%; right: 8%; height: 3px; background: var(--accent);
+      top: 50%; box-shadow: 0 0 8px var(--accent); animation: scan 2s ease-in-out infinite;
+    }
+    @keyframes scan { 0%,100% { top: 20%; } 50% { top: 80%; } }
+    .scan-status { text-align: center; font-size: 13px; margin-top: 12px; font-weight: 800; color: #444; }
   </style>
 </head>
 <body>
@@ -207,7 +235,10 @@
         <p class="sub" style="margin-bottom:16px;">Scan QR pengirim atau masukkan kode.</p>
 
         <input type="text" id="codeInput" placeholder="KODE" maxlength="8" autocomplete="off" />
-        <button class="btn blue" id="receiveBtn" onclick="checkCode()">Cari File</button>
+        <div style="display:flex; gap:10px;">
+          <button class="btn blue" id="receiveBtn" onclick="checkCode()">Cari File</button>
+          <button class="btn pink" onclick="startScan()" style="width:auto; padding:15px 18px;">📷 Scan QR</button>
+        </div>
 
         <div class="dl-toolbar hidden" id="dlToolbar">
           <label><input type="checkbox" id="selectAll" onchange="toggleAll()" /> Pilih Semua</label>
@@ -224,7 +255,22 @@
     <div class="footer">File tersimpan aman & terhapus otomatis setelah 1 jam.</div>
   </div>
 
+  <!-- Scan modal -->
+  <div class="modal-overlay hidden" id="scanModal">
+    <div class="modal">
+      <button class="close" onclick="stopScan()">✕</button>
+      <h3>Scan QR Code</h3>
+      <div class="scanner-box">
+        <video id="scannerVideo" playsinline muted></video>
+        <canvas id="scannerCanvas"></canvas>
+        <div class="scan-line"></div>
+      </div>
+      <p class="scan-status" id="scanStatus">Arahkan kamera ke QR code pengirim...</p>
+    </div>
+  </div>
+
   <script src="qrcode.js"></script>
+  <script src="jsQR.js"></script>
   <script>
     let selectedFiles = [];
     let activeCode = null;
@@ -412,6 +458,81 @@
           window.location.href = '/api/download/' + encodeURIComponent(activeCode) + '/' + encodeURIComponent(id);
         }, idx * 300);
       });
+    }
+
+    // ---- QR Scanner ----
+    let scanStream = null;
+    let scanRaf = null;
+    let scanDecoded = false;
+
+    async function startScan() {
+      const modal = document.getElementById('scanModal');
+      const video = document.getElementById('scannerVideo');
+      modal.classList.remove('hidden');
+      scanDecoded = false;
+      document.getElementById('scanStatus').textContent = 'Arahkan kamera ke QR code pengirim...';
+
+      try {
+        scanStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false,
+        });
+        video.srcObject = scanStream;
+        await video.play();
+        scanLoop();
+      } catch (e) {
+        document.getElementById('scanStatus').textContent = 'Tidak bisa mengakses kamera: ' + e.message;
+      }
+    }
+
+    function scanLoop() {
+      const video = document.getElementById('scannerVideo');
+      const canvas = document.getElementById('scannerCanvas');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+      function tick() {
+        if (!scanDecoded && video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'dontInvert',
+          });
+          if (code && code.data) {
+            scanDecoded = true;
+            handleScanned(code.data);
+            return;
+          }
+        }
+        scanRaf = requestAnimationFrame(tick);
+      }
+      tick();
+    }
+
+    function handleScanned(text) {
+      stopScan();
+      // Extract code from either a full URL (#r=CODE) or a raw code
+      let code = text;
+      const m = text.match(/[#?&]r=([A-Za-z0-9]+)/);
+      if (m) code = m[1];
+      else {
+        const bare = text.trim().match(/^([A-Za-z0-9]{8})$/);
+        if (bare) code = bare[1];
+      }
+      showReceive();
+      document.getElementById('codeInput').value = code;
+      checkCode();
+    }
+
+    function stopScan() {
+      scanDecoded = true;
+      if (scanRaf) cancelAnimationFrame(scanRaf);
+      if (scanStream) {
+        scanStream.getTracks().forEach((t) => t.stop());
+        scanStream = null;
+      }
+      document.getElementById('scanModal').classList.add('hidden');
     }
 
     function escapeHtml(s) {
