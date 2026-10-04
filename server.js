@@ -9,7 +9,9 @@ const app = express();
 
 // ---- Configuration (via env, with sensible defaults) ----
 const PORT = process.env.PORT || 8088;
-const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE || 1024 * 1024 * 1024); // 1 GB
+const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE || 1024 * 1024 * 1024); // 1 GB per file
+const MAX_BATCH_SIZE = Number(process.env.MAX_BATCH_SIZE || 5 * 1024 * 1024 * 1024); // 5 GB total per batch
+const MAX_FILES = Number(process.env.MAX_FILES || 50); // max files per batch
 const TTL_MS = Number(process.env.TTL_MS || 60 * 60 * 1000); // 1 hour
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -21,7 +23,8 @@ for (const dir of [UPLOAD_DIR, DATA_DIR]) {
 }
 
 // ---- Metadata store (in-memory + persisted to disk) ----
-let metadata = {}; // code -> { fileName, storedName, size, createdAt, expiresAt, downloads, maxDownloads }
+// code -> { files: [{ id, fileName, storedName, size }], createdAt, expiresAt }
+let metadata = {};
 let persistTimer = null;
 
 function loadMetadata() {
@@ -67,19 +70,21 @@ function sanitizeFilename(name) {
   return cleaned || 'file';
 }
 
-// ---- Cleanup job: remove expired files ----
+// ---- Cleanup job: remove expired batches ----
 function cleanupExpired() {
   const now = Date.now();
   for (const code of Object.keys(metadata)) {
     const m = metadata[code];
-    if (now > m.expiresAt || (m.maxDownloads && m.downloads >= m.maxDownloads)) {
-      const filePath = path.join(UPLOAD_DIR, m.storedName);
-      try {
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      } catch (e) { /* ignore */ }
+    if (now > m.expiresAt) {
+      for (const f of m.files) {
+        const filePath = path.join(UPLOAD_DIR, f.storedName);
+        try {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        } catch (e) { /* ignore */ }
+      }
       delete metadata[code];
       persistMetadata();
-      console.log(`[cleanup] removed ${code} (${m.fileName})`);
+      console.log(`[cleanup] removed batch ${code} (${m.files.length} file)`);
     }
   }
 }
@@ -88,7 +93,7 @@ setInterval(cleanupExpired, 60 * 1000).unref();
 // ---- Rate limiting (prevent brute-forcing download codes) ----
 const downloadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  limit: 60, // 60 attempts per IP per window
+  limit: 120, // attempts per IP per window
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Terlalu banyak percobaan. Coba lagi nanti.' },
@@ -104,41 +109,47 @@ const uploadLimiter = rateLimit({
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---- Upload endpoint (streaming via busboy) ----
+// ---- Upload endpoint (multi-file, streaming via busboy) ----
 app.post('/api/upload', uploadLimiter, (req, res) => {
-  let fileInfo = null;
   let completed = false;
   let aborted = false;
+
+  const code = generateCode();
+  const files = []; // collected file metadata
+  const tempPaths = []; // paths written so far (for cleanup on failure)
+  let totalBytes = 0;
 
   const bb = busboy({
     headers: req.headers,
     limits: {
       fileSize: MAX_FILE_SIZE,
-      files: 1,
+      files: MAX_FILES,
+      parts: MAX_FILES,
     },
   });
 
-  const code = generateCode();
-  const storedName = `${code}_${crypto.randomBytes(6).toString('hex')}`;
-  const filePath = path.join(UPLOAD_DIR, storedName);
-  const writeStream = fs.createWriteStream(filePath);
-
-  let receivedBytes = 0;
-
   bb.on('file', (fieldname, file, info) => {
     const originalName = sanitizeFilename(info.filename);
-    fileInfo = { fileName: originalName, storedName, size: 0 };
+    const fileId = crypto.randomBytes(6).toString('hex');
+    const storedName = `${code}_${fileId}`;
+    const filePath = path.join(UPLOAD_DIR, storedName);
+    const writeStream = fs.createWriteStream(filePath);
+    tempPaths.push(filePath);
+
+    const entry = { id: fileId, fileName: originalName, storedName, size: 0 };
+    files.push(entry);
 
     file.on('data', (chunk) => {
-      receivedBytes += chunk.length;
+      entry.size += chunk.length;
+      totalBytes += chunk.length;
     });
 
     file.on('limit', () => {
       aborted = true;
       writeStream.destroy();
-      fs.unlink(filePath, () => {});
-      res.status(413).json({ error: 'File terlalu besar. Maksimal 1 GB.' });
       req.unpipe(bb);
+      cleanupTemp(tempPaths);
+      res.status(413).json({ error: 'Salah satu file melebihi batas ukuran (maks 1 GB per file).' });
     });
 
     file.pipe(writeStream);
@@ -148,35 +159,36 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
     if (completed || aborted) return;
     completed = true;
 
-    writeStream.end(() => {
-      if (aborted) return;
-      const now = Date.now();
-      const meta = {
-        fileName: fileInfo ? fileInfo.fileName : 'file',
-        storedName,
-        size: receivedBytes,
-        createdAt: now,
-        expiresAt: now + TTL_MS,
-        downloads: 0,
-        maxDownloads: null,
-      };
-      metadata[code] = meta;
-      persistMetadata();
+    if (files.length === 0) {
+      cleanupTemp(tempPaths);
+      return res.status(400).json({ error: 'Tidak ada file yang dikirim.' });
+    }
+    if (totalBytes > MAX_BATCH_SIZE) {
+      cleanupTemp(tempPaths);
+      return res.status(413).json({ error: 'Total ukuran batch melebihi batas (maks 5 GB).' });
+    }
 
-      res.json({
-        code,
-        fileName: meta.fileName,
-        size: meta.size,
-        expiresAt: meta.expiresAt,
-      });
+    const now = Date.now();
+    metadata[code] = {
+      files,
+      createdAt: now,
+      expiresAt: now + TTL_MS,
+    };
+    persistMetadata();
+
+    res.json({
+      code,
+      fileCount: files.length,
+      totalSize: totalBytes,
+      files: files.map((f) => ({ fileName: f.fileName, size: f.size })),
+      expiresAt: now + TTL_MS,
     });
   });
 
   bb.on('error', (err) => {
     if (!completed && !aborted) {
       completed = true;
-      writeStream.destroy();
-      fs.unlink(filePath, () => {});
+      cleanupTemp(tempPaths);
       res.status(400).json({ error: 'Upload gagal: ' + err.message });
     }
   });
@@ -184,44 +196,56 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
   req.pipe(bb);
 });
 
-// ---- Info endpoint (check code exists, without downloading) ----
+function cleanupTemp(paths) {
+  for (const p of paths) {
+    fs.unlink(p, () => {});
+  }
+}
+
+// ---- Info endpoint (list files in a batch) ----
 app.get('/api/info/:code', (req, res) => {
   const code = req.params.code;
   const m = metadata[code];
   if (!m || Date.now() > m.expiresAt) {
     return res.status(404).json({ error: 'File tidak ditemukan atau sudah kedaluwarsa.' });
   }
-  res.json({ fileName: m.fileName, size: m.size, expiresAt: m.expiresAt });
+  res.json({
+    code,
+    expiresAt: m.expiresAt,
+    fileCount: m.files.length,
+    files: m.files.map((f) => ({
+      id: f.id,
+      fileName: f.fileName,
+      size: f.size,
+    })),
+  });
 });
 
-// ---- Download endpoint (streaming) ----
-app.get('/api/download/:code', downloadLimiter, (req, res) => {
-  const code = req.params.code;
+// ---- Download endpoint (single file within a batch, streaming) ----
+app.get('/api/download/:code/:fileId', downloadLimiter, (req, res) => {
+  const { code, fileId } = req.params;
   const m = metadata[code];
 
   if (!m || Date.now() > m.expiresAt) {
     return res.status(404).json({ error: 'File tidak ditemukan atau sudah kedaluwarsa.' });
   }
-  if (m.maxDownloads && m.downloads >= m.maxDownloads) {
-    return res.status(410).json({ error: 'File sudah mencapai batas unduh.' });
+
+  const file = m.files.find((f) => f.id === fileId);
+  if (!file) {
+    return res.status(404).json({ error: 'File tidak ditemukan dalam batch ini.' });
   }
 
-  const filePath = path.join(UPLOAD_DIR, m.storedName);
+  const filePath = path.join(UPLOAD_DIR, file.storedName);
   if (!fs.existsSync(filePath)) {
-    delete metadata[code];
-    persistMetadata();
     return res.status(404).json({ error: 'File tidak ditemukan di server.' });
   }
-
-  m.downloads += 1;
-  persistMetadata();
 
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader(
     'Content-Disposition',
-    `attachment; filename*=UTF-8''${encodeURIComponent(m.fileName)}`
+    `attachment; filename*=UTF-8''${encodeURIComponent(file.fileName)}`
   );
-  res.setHeader('Content-Length', m.size);
+  res.setHeader('Content-Length', file.size);
 
   const readStream = fs.createReadStream(filePath);
   readStream.on('error', () => res.destroy());
