@@ -12,7 +12,10 @@ const PORT = process.env.PORT || 8088;
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE || 1024 * 1024 * 1024); // 1 GB per file
 const MAX_BATCH_SIZE = Number(process.env.MAX_BATCH_SIZE || 5 * 1024 * 1024 * 1024); // 5 GB total per batch
 const MAX_FILES = Number(process.env.MAX_FILES || 50); // max files per batch
-const TTL_MS = Number(process.env.TTL_MS || 60 * 60 * 1000); // 1 hour
+const TTL_MS = Number(process.env.TTL_MS || 60 * 60 * 1000); // 1 hour (full lifetime once accessed)
+const GRACE_TTL_MS = Number(process.env.GRACE_TTL_MS || 3 * 60 * 1000); // 3 min before first access
+const MAX_ACTIVE_BATCHES_PER_IP = Number(process.env.MAX_ACTIVE_BATCHES_PER_IP || 3);
+const MAX_TOTAL_STORAGE = Number(process.env.MAX_TOTAL_STORAGE || 3 * 1024 * 1024 * 1024); // 3 GB
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const METADATA_FILE = path.join(DATA_DIR, 'metadata.json');
@@ -23,9 +26,25 @@ for (const dir of [UPLOAD_DIR, DATA_DIR]) {
 }
 
 // ---- Metadata store (in-memory + persisted to disk) ----
-// code -> { files: [{ id, fileName, storedName, size }], createdAt, expiresAt }
+// code -> { files: [{ id, fileName, storedName, size }], createdAt, expiresAt, uploaderIp, accessed }
 let metadata = {};
 let persistTimer = null;
+
+function totalActiveSize() {
+  let total = 0;
+  for (const code of Object.keys(metadata)) {
+    for (const f of metadata[code].files) total += f.size;
+  }
+  return total;
+}
+
+function activeBatchesForIp(ip) {
+  let count = 0;
+  for (const code of Object.keys(metadata)) {
+    if (metadata[code].uploaderIp === ip) count++;
+  }
+  return count;
+}
 
 function loadMetadata() {
   try {
@@ -81,6 +100,16 @@ function isBlockedFilename(name) {
   return BLOCKED_EXTENSIONS.has(ext);
 }
 
+// Resolve the real client IP (app sits behind nginx reverse proxy)
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) {
+    const first = String(xff).split(',')[0].trim();
+    if (first) return first;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
 // ---- Cleanup job: remove expired batches ----
 function cleanupExpired() {
   const now = Date.now();
@@ -99,7 +128,7 @@ function cleanupExpired() {
     }
   }
 }
-setInterval(cleanupExpired, 60 * 1000).unref();
+setInterval(cleanupExpired, 30 * 1000).unref();
 
 // ---- Rate limiting (prevent brute-forcing download codes) ----
 const downloadLimiter = rateLimit({
@@ -127,12 +156,20 @@ const infoLimiter = rateLimit({
   message: { error: 'Terlalu banyak percobaan kode. Coba lagi nanti.' },
 });
 
+app.set('trust proxy', true);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---- Upload endpoint (multi-file, streaming via busboy) ----
 app.post('/api/upload', uploadLimiter, (req, res) => {
   let completed = false;
   let aborted = false;
+
+  const uploaderIp = getClientIp(req);
+
+  // Reject early if this IP already has too many active batches
+  if (activeBatchesForIp(uploaderIp) >= MAX_ACTIVE_BATCHES_PER_IP) {
+    return res.status(429).json({ error: 'Terlalu banyak kiriman aktif. Tunggu file lama terhapus dulu.' });
+  }
 
   const code = generateCode();
   const files = []; // collected file metadata
@@ -198,12 +235,18 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
       cleanupTemp(tempPaths);
       return res.status(413).json({ error: 'Total ukuran batch melebihi batas (maks 5 GB).' });
     }
+    if (totalActiveSize() + totalBytes > MAX_TOTAL_STORAGE) {
+      cleanupTemp(tempPaths);
+      return res.status(507).json({ error: 'Penyimpanan penuh. Coba lagi nanti.' });
+    }
 
     const now = Date.now();
     metadata[code] = {
       files,
       createdAt: now,
-      expiresAt: now + TTL_MS,
+      expiresAt: now + GRACE_TTL_MS, // short grace period until first access
+      uploaderIp,
+      accessed: false,
     };
     persistMetadata();
 
@@ -212,7 +255,7 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
       fileCount: files.length,
       totalSize: totalBytes,
       files: files.map((f) => ({ fileName: f.fileName, size: f.size })),
-      expiresAt: now + TTL_MS,
+      expiresAt: now + GRACE_TTL_MS,
     });
   });
 
@@ -240,6 +283,14 @@ app.get('/api/info/:code', infoLimiter, (req, res) => {
   if (!m || Date.now() > m.expiresAt) {
     return res.status(404).json({ error: 'File tidak ditemukan atau sudah kedaluwarsa.' });
   }
+
+  // First access extends the batch to its full lifetime
+  if (!m.accessed) {
+    m.accessed = true;
+    m.expiresAt = Date.now() + TTL_MS;
+    persistMetadata();
+  }
+
   res.json({
     code,
     expiresAt: m.expiresAt,
@@ -259,6 +310,13 @@ app.get('/api/download/:code/:fileId', downloadLimiter, (req, res) => {
 
   if (!m || Date.now() > m.expiresAt) {
     return res.status(404).json({ error: 'File tidak ditemukan atau sudah kedaluwarsa.' });
+  }
+
+  // Extend lifetime on access as well (someone might download directly)
+  if (!m.accessed) {
+    m.accessed = true;
+    m.expiresAt = Date.now() + TTL_MS;
+    persistMetadata();
   }
 
   const file = m.files.find((f) => f.id === fileId);
