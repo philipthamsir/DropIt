@@ -218,13 +218,15 @@
         <button class="btn" id="uploadBtn" onclick="uploadFiles()">Kirim</button>
 
         <div class="result hidden" id="sendResult">
-          <p style="text-align:center; margin-bottom:4px;">Berhasil! Scan QR atau salin kode:</p>
-          <div class="qr-wrap" id="qrWrap"></div>
+          <p style="text-align:center; margin-bottom:4px;">Berhasil! Bagikan kode ini ke penerima:</p>
           <div class="code-box">
             <span class="code" id="shareCode"></span>
-            <button onclick="copyCode()">Salin</button>
+            <button onclick="copyCode()">Salin Kode</button>
           </div>
-          <p class="hint">Penerima buka situs ini → pilih <b>Receive</b> → scan QR / masukkan kode. Berlaku <b>1 jam</b>.</p>
+          <p class="hint" style="text-align:center;">Kode di atas bisa <b>diketik manual</b> (gampang di laptop).</p>
+          <div class="qr-wrap" id="qrWrap"></div>
+          <p class="hint" style="text-align:center;">Atau biarkan penerima <b>scan QR ini</b> (pakai kamera HP).</p>
+          <button class="btn ghost" onclick="copyLink()" style="margin-top:8px;">🔗 Salin Link</button>
         </div>
       </section>
 
@@ -234,11 +236,13 @@
         <h2 class="h2">Terima File</h2>
         <p class="sub" style="margin-bottom:16px;">Scan QR pengirim atau masukkan kode.</p>
 
-        <input type="text" id="codeInput" placeholder="KODE" maxlength="8" autocomplete="off" />
+        <input type="text" id="codeInput" placeholder="000 000" inputmode="numeric" autocomplete="off" />
         <div style="display:flex; gap:10px;">
           <button class="btn blue" id="receiveBtn" onclick="checkCode()">Cari File</button>
-          <button class="btn pink" onclick="startScan()" style="width:auto; padding:15px 18px;">📷 Scan QR</button>
+          <button class="btn pink" onclick="startScan()" style="width:auto; padding:15px 18px;">📷 Scan</button>
         </div>
+        <button class="btn ghost" onclick="showMyQR()" style="margin-top:10px;">📱 Tampilkan QR saya (biar pengirim yang scan)</button>
+        <div class="qr-wrap hidden" id="myQrWrap"></div>
 
         <div class="dl-toolbar hidden" id="dlToolbar">
           <label><input type="checkbox" id="selectAll" onchange="toggleAll()" /> Pilih Semua</label>
@@ -355,7 +359,7 @@
         if (xhr.status === 200) {
           const data = JSON.parse(xhr.responseText);
           activeCode = data.code;
-          document.getElementById('shareCode').textContent = data.code;
+          document.getElementById('shareCode').textContent = formatCode(data.code);
           renderQR(data.code);
           document.getElementById('sendResult').classList.remove('hidden');
           status.innerHTML = '<span class="ok-msg">Berhasil! ' + data.fileCount + ' file terkirim.</span>';
@@ -376,10 +380,19 @@
       xhr.send(fd);
     }
 
-    function renderQR(code) {
-      const wrap = document.getElementById('qrWrap');
+    function formatCode(code) {
+      const c = String(code).replace(/\D/g, '');
+      return c.length > 3 ? c.slice(0, 3) + ' ' + c.slice(3) : c;
+    }
+
+    function buildShareUrl(code) {
+      return location.origin + '/#r=' + code;
+    }
+
+    function renderQR(code, targetId) {
+      const wrap = document.getElementById(targetId || 'qrWrap');
       wrap.innerHTML = '';
-      const url = location.origin + '/#r=' + code;
+      const url = buildShareUrl(code);
       const qr = qrcode(0, 'M');
       qr.addData(url);
       qr.make();
@@ -390,17 +403,38 @@
     }
 
     function copyCode() {
-      const code = document.getElementById('shareCode').textContent;
+      const code = activeCode;
       navigator.clipboard.writeText(code).then(() => {
         const b = document.querySelector('.code-box button');
         b.textContent = 'Tersalin!';
-        setTimeout(() => b.textContent = 'Salin', 1500);
+        setTimeout(() => b.textContent = 'Salin Kode', 1500);
       });
+    }
+
+    function copyLink() {
+      navigator.clipboard.writeText(buildShareUrl(activeCode)).then(() => {
+        const b = document.querySelector('#sendResult .btn.ghost');
+        b.textContent = '🔗 Link Tersalin!';
+        setTimeout(() => b.textContent = '🔗 Salin Link', 1500);
+      });
+    }
+
+    // Two-way scan: receiver can show their own QR for the sender to scan.
+    function showMyQR() {
+      const code = (document.getElementById('codeInput').value || '').replace(/\D/g, '');
+      if (code.length !== 6) {
+        const errEl = document.getElementById('receiveError');
+        errEl.textContent = 'Masukkan 6 digit kode dulu, atau scan QR pengirim.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+      renderQR(code, 'myQrWrap');
+      document.getElementById('myQrWrap').classList.remove('hidden');
     }
 
     // ---- Receive ----
     function checkCode() {
-      const code = document.getElementById('codeInput').value.trim();
+      const code = (document.getElementById('codeInput').value || '').replace(/\D/g, '');
       const errEl = document.getElementById('receiveError');
       errEl.classList.add('hidden');
       if (!code) return;
@@ -512,16 +546,16 @@
 
     function handleScanned(text) {
       stopScan();
-      // Extract code from either a full URL (#r=CODE) or a raw code
+      // Extract code from either a full URL (#r=CODE) or a raw 6-digit code
       let code = text;
-      const m = text.match(/[#?&]r=([A-Za-z0-9]+)/);
+      const m = text.match(/[#?&]r=([0-9]+)/);
       if (m) code = m[1];
       else {
-        const bare = text.trim().match(/^([A-Za-z0-9]{8})$/);
-        if (bare) code = bare[1];
+        const bare = text.trim().replace(/\D/g, '');
+        if (/^[0-9]{6}$/.test(bare)) code = bare;
       }
       showReceive();
-      document.getElementById('codeInput').value = code;
+      document.getElementById('codeInput').value = formatCode(code);
       checkCode();
     }
 
@@ -539,7 +573,12 @@
       return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
-    document.getElementById('codeInput').addEventListener('keydown', (e) => {
+    const codeInput = document.getElementById('codeInput');
+    codeInput.addEventListener('input', (e) => {
+      let digits = e.target.value.replace(/\D/g, '').slice(0, 6);
+      e.target.value = formatCode(digits);
+    });
+    codeInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') checkCode();
     });
 

@@ -51,14 +51,10 @@ function persistMetadata() {
 }
 
 function generateCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  // 6-digit numeric code — easy to type on a laptop or read aloud.
   let code;
   do {
-    code = '';
-    const bytes = crypto.randomBytes(8);
-    for (let i = 0; i < 8; i++) {
-      code += chars[bytes[i] % chars.length];
-    }
+    code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
   } while (metadata[code]);
   return code;
 }
@@ -120,6 +116,15 @@ const uploadLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Terlalu banyak upload. Coba lagi nanti.' },
+});
+
+// Extra-strict limiter for code lookups (6-digit codes are brute-forceable)
+const infoLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Terlalu banyak percobaan kode. Coba lagi nanti.' },
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -229,7 +234,7 @@ function cleanupTemp(paths) {
 }
 
 // ---- Info endpoint (list files in a batch) ----
-app.get('/api/info/:code', (req, res) => {
+app.get('/api/info/:code', infoLimiter, (req, res) => {
   const code = req.params.code;
   const m = metadata[code];
   if (!m || Date.now() > m.expiresAt) {
