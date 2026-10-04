@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Runtime data (file hasil upload & metadata — JANGAN di-commit)
+uploads/*
+!uploads/.gitkeep
+data/*
+!data/.gitkeep
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+.env.*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

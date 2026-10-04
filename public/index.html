@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DropIt — Kirim & Terima File</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-soft: #1e293b;
+      --card: #1e293b;
+      --accent: #38bdf8;
+      --accent-2: #818cf8;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --danger: #f87171;
+      --ok: #4ade80;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(1200px 600px at 20% -10%, #1e3a5f 0%, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .app { width: 100%; max-width: 560px; }
+    .card {
+      background: var(--card);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 32px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+    h1 { font-size: 28px; letter-spacing: -0.5px; }
+    .logo { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .logo .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+    .sub { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+    .choices { display: flex; flex-direction: column; gap: 14px; }
+    .btn-choice {
+      display: flex; align-items: center; gap: 14px;
+      padding: 18px 20px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.1);
+      background: var(--bg-soft); color: var(--text); font-size: 16px; cursor: pointer;
+      transition: all .15s ease; text-align: left; width: 100%;
+    }
+    .btn-choice:hover { border-color: var(--accent); transform: translateY(-1px); }
+    .btn-choice .ic { font-size: 26px; }
+    .btn-choice .t { font-weight: 600; }
+    .btn-choice .d { color: var(--muted); font-size: 13px; font-weight: 400; }
+
+    .back { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; margin-bottom: 18px; padding: 0; }
+    .back:hover { color: var(--text); }
+
+    .dropzone {
+      border: 2px dashed rgba(255,255,255,0.2); border-radius: 16px; padding: 40px 20px;
+      text-align: center; cursor: pointer; transition: all .15s ease; margin-bottom: 16px;
+    }
+    .dropzone.drag { border-color: var(--accent); background: rgba(56,189,248,0.08); }
+    .dropzone .big { font-size: 40px; }
+    .dropzone p { color: var(--muted); font-size: 14px; margin-top: 8px; }
+    .dropzone .browse { color: var(--accent); font-weight: 600; }
+
+    input[type="file"] { display: none; }
+
+    .file-preview { display: flex; align-items: center; gap: 12px; padding: 14px; background: var(--bg-soft); border-radius: 12px; margin-bottom: 16px; }
+    .file-preview .n { font-weight: 600; word-break: break-all; }
+    .file-preview .s { color: var(--muted); font-size: 13px; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      padding: 14px 20px; border-radius: 12px; border: none; cursor: pointer; font-size: 15px; font-weight: 600;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04121f;
+      width: 100%; transition: opacity .15s ease;
+    }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.ghost { background: var(--bg-soft); color: var(--text); border: 1px solid rgba(255,255,255,0.1); }
+
+    .progress { height: 8px; background: var(--bg-soft); border-radius: 99px; overflow: hidden; margin: 16px 0; display: none; }
+    .progress .bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s ease; }
+
+    .result { margin-top: 20px; }
+    .code-box {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      background: var(--bg-soft); border: 1px solid var(--accent); border-radius: 12px; padding: 14px 18px; margin: 12px 0;
+    }
+    .code-box .code { font-size: 28px; font-weight: 800; letter-spacing: 4px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    .code-box button { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 14px; font-weight: 600; }
+    .hint { color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+    input[type="text"] {
+      width: 100%; padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.15);
+      background: var(--bg-soft); color: var(--text); font-size: 20px; letter-spacing: 2px;
+      text-align: center; font-family: ui-monospace, monospace; margin: 8px 0 16px;
+    }
+    input[type="text"]:focus { outline: none; border-color: var(--accent); }
+
+    .error { color: var(--danger); font-size: 14px; margin-top: 12px; text-align: center; }
+    .ok-msg { color: var(--ok); font-size: 14px; margin-top: 12px; text-align: center; }
+    .download-info { padding: 16px; background: var(--bg-soft); border-radius: 12px; margin: 12px 0; text-align: center; }
+    .download-info .n { font-weight: 700; word-break: break-all; }
+    .download-info .s { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+    .hidden { display: none !important; }
+    .footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <div class="logo"><span class="dot"></span><h1>DropIt</h1></div>
+      <p class="sub">Kirim & terima file antar perangkat, cepat dan aman.</p>
+
+      <!-- HOME -->
+      <section id="home">
+        <div class="choices">
+          <button class="btn-choice" onclick="showSend()">
+            <span class="ic">📤</span>
+            <span><span class="t">Send</span><br><span class="d">Kirim file, dapatkan kode untuk di-share</span></span>
+          </button>
+          <button class="btn-choice" onclick="showReceive()">
+            <span class="ic">📥</span>
+            <span><span class="t">Receive</span><br><span class="d">Masukkan kode untuk mengunduh file</span></span>
+          </button>
+        </div>
+      </section>
+
+      <!-- SEND -->
+      <section id="send" class="hidden">
+        <button class="back" onclick="showHome()">← Kembali</button>
+        <h2 style="margin-bottom:4px;">Kirim File</h2>
+        <p class="sub" style="margin-bottom:16px;">Maksimal 1 GB · File terhapus otomatis setelah 1 jam</p>
+
+        <div class="dropzone" id="dropzone">
+          <div class="big">📂</div>
+          <p>Seret & letakkan file di sini,<br>atau <span class="browse">pilih file</span></p>
+        </div>
+        <input type="file" id="fileInput" />
+
+        <div class="file-preview hidden" id="filePreview">
+          <span style="font-size:24px;">📄</span>
+          <div>
+            <div class="n" id="fileName"></div>
+            <div class="s" id="fileSize"></div>
+          </div>
+        </div>
+
+        <div class="progress" id="progress"><div class="bar" id="progressBar"></div></div>
+        <div id="uploadStatus"></div>
+
+        <button class="btn" id="uploadBtn" onclick="uploadFile()">Kirim</button>
+
+        <div class="result hidden" id="sendResult">
+          <p style="text-align:center; margin-bottom:4px;">File berhasil dikirim! Bagikan kode ini:</p>
+          <div class="code-box">
+            <span class="code" id="shareCode"></span>
+            <button onclick="copyCode()">Salin</button>
+          </div>
+          <p class="hint">Penerima bisa membuka situs ini, pilih <b>Receive</b>, lalu masukkan kode di atas. File berlaku selama <b>1 jam</b>.</p>
+        </div>
+      </section>
+
+      <!-- RECEIVE -->
+      <section id="receive" class="hidden">
+        <button class="back" onclick="showHome()">← Kembali</button>
+        <h2 style="margin-bottom:4px;">Terima File</h2>
+        <p class="sub" style="margin-bottom:16px;">Masukkan kode yang diberikan pengirim</p>
+
+        <input type="text" id="codeInput" placeholder="KODE" maxlength="8" autocomplete="off" />
+        <button class="btn" id="receiveBtn" onclick="checkCode()">Cari File</button>
+
+        <div class="download-info hidden" id="downloadInfo">
+          <div class="n" id="dlFileName"></div>
+          <div class="s" id="dlFileSize"></div>
+        </div>
+        <button class="btn hidden" id="downloadBtn" onclick="downloadFile()">⬇️ Unduh File</button>
+
+        <div class="error hidden" id="receiveError"></div>
+      </section>
+    </div>
+    <div class="footer">File tersimpan aman & terhapus otomatis setelah 1 jam.</div>
+  </div>
+
+  <script>
+    let selectedFile = null;
+    let activeCode = null;
+
+    function show(el) {
+      ['home','send','receive'].forEach(id => document.getElementById(id).classList.add('hidden'));
+      document.getElementById(el).classList.remove('hidden');
+    }
+    function showHome() { show('home'); }
+    function showSend() { show('send'); }
+    function showReceive() { show('receive'); }
+
+    // ---- Drag & drop ----
+    const dz = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+
+    dz.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length) setFile(e.target.files[0]);
+    });
+    dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('drag'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+    dz.addEventListener('drop', (e) => {
+      e.preventDefault(); dz.classList.remove('drag');
+      if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
+    });
+
+    function setFile(f) {
+      selectedFile = f;
+      document.getElementById('filePreview').classList.remove('hidden');
+      document.getElementById('fileName').textContent = f.name;
+      document.getElementById('fileSize').textContent = humanSize(f.size);
+      document.getElementById('sendResult').classList.add('hidden');
+    }
+
+    function humanSize(bytes) {
+      if (bytes === 0) return '0 B';
+      const u = ['B','KB','MB','GB']; const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + u[i];
+    }
+
+    // ---- Upload ----
+    function uploadFile() {
+      if (!selectedFile) { alert('Pilih file dulu!'); return; }
+      const btn = document.getElementById('uploadBtn');
+      const prog = document.getElementById('progress');
+      const bar = document.getElementById('progressBar');
+      const status = document.getElementById('uploadStatus');
+
+      btn.disabled = true;
+      prog.style.display = 'block';
+      status.innerHTML = '';
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) bar.style.width = (e.loaded / e.total * 100) + '%';
+      };
+      xhr.onload = () => {
+        btn.disabled = false;
+        prog.style.display = 'none';
+        if (xhr.status === 200) {
+          const data = JSON.parse(xhr.responseText);
+          activeCode = data.code;
+          document.getElementById('shareCode').textContent = data.code;
+          document.getElementById('sendResult').classList.remove('hidden');
+          status.innerHTML = '<span class="ok-msg">Berhasil!</span>';
+        } else {
+          let msg = 'Upload gagal.';
+          try { msg = JSON.parse(xhr.responseText).error || msg; } catch(e){}
+          status.innerHTML = '<span class="error">' + escapeHtml(msg) + '</span>';
+        }
+      };
+      xhr.onerror = () => {
+        btn.disabled = false;
+        prog.style.display = 'none';
+        status.innerHTML = '<span class="error">Koneksi terputus.</span>';
+      };
+
+      const fd = new FormData();
+      fd.append('file', selectedFile);
+      xhr.send(fd);
+    }
+
+    function copyCode() {
+      const code = document.getElementById('shareCode').textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        const b = document.querySelector('.code-box button');
+        b.textContent = 'Tersalin!';
+        setTimeout(() => b.textContent = 'Salin', 1500);
+      });
+    }
+
+    // ---- Receive ----
+    function checkCode() {
+      const code = document.getElementById('codeInput').value.trim();
+      const errEl = document.getElementById('receiveError');
+      errEl.classList.add('hidden');
+      if (!code) return;
+
+      fetch('/api/info/' + encodeURIComponent(code))
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+          if (!ok) { errEl.textContent = d.error; errEl.classList.remove('hidden'); return; }
+          activeCode = code;
+          document.getElementById('dlFileName').textContent = d.fileName;
+          document.getElementById('dlFileSize').textContent = humanSize(d.size);
+          document.getElementById('downloadInfo').classList.remove('hidden');
+          document.getElementById('downloadBtn').classList.remove('hidden');
+        })
+        .catch(() => { errEl.textContent = 'Koneksi gagal.'; errEl.classList.remove('hidden'); });
+    }
+
+    function downloadFile() {
+      if (!activeCode) return;
+      window.location.href = '/api/download/' + encodeURIComponent(activeCode);
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    document.getElementById('codeInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') checkCode();
+    });
+  </script>
+</body>
+</html>
