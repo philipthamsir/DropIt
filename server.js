@@ -14,7 +14,7 @@ const MAX_BATCH_SIZE = Number(process.env.MAX_BATCH_SIZE || 5 * 1024 * 1024 * 10
 const MAX_FILES = Number(process.env.MAX_FILES || 50); // max files per batch
 const TTL_MS = Number(process.env.TTL_MS || 60 * 60 * 1000); // 1 hour (full lifetime once accessed)
 const GRACE_TTL_MS = Number(process.env.GRACE_TTL_MS || 3 * 60 * 1000); // 3 min before first access
-const MAX_ACTIVE_BATCHES_PER_IP = Number(process.env.MAX_ACTIVE_BATCHES_PER_IP || 3);
+const MAX_TOTAL_SIZE_PER_IP = Number(process.env.MAX_TOTAL_SIZE_PER_IP || 500 * 1024 * 1024); // 500 MB per IP
 const MAX_TOTAL_STORAGE = Number(process.env.MAX_TOTAL_STORAGE || 3 * 1024 * 1024 * 1024); // 3 GB
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, 'uploads');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -38,12 +38,15 @@ function totalActiveSize() {
   return total;
 }
 
-function activeBatchesForIp(ip) {
-  let count = 0;
+function totalSizeForIp(ip) {
+  let total = 0;
   for (const code of Object.keys(metadata)) {
-    if (metadata[code].uploaderIp === ip) count++;
+    const m = metadata[code];
+    if (m.uploaderIp === ip) {
+      for (const f of m.files) total += f.size;
+    }
   }
-  return count;
+  return total;
 }
 
 function loadMetadata() {
@@ -166,11 +169,6 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
 
   const uploaderIp = getClientIp(req);
 
-  // Reject early if this IP already has too many active batches
-  if (activeBatchesForIp(uploaderIp) >= MAX_ACTIVE_BATCHES_PER_IP) {
-    return res.status(429).json({ error: 'Terlalu banyak kiriman aktif. Tunggu file lama terhapus dulu.' });
-  }
-
   const code = generateCode();
   const files = []; // collected file metadata
   const tempPaths = []; // paths written so far (for cleanup on failure)
@@ -238,6 +236,10 @@ app.post('/api/upload', uploadLimiter, (req, res) => {
     if (totalActiveSize() + totalBytes > MAX_TOTAL_STORAGE) {
       cleanupTemp(tempPaths);
       return res.status(507).json({ error: 'Penyimpanan penuh. Coba lagi nanti.' });
+    }
+    if (totalSizeForIp(uploaderIp) + totalBytes > MAX_TOTAL_SIZE_PER_IP) {
+      cleanupTemp(tempPaths);
+      return res.status(429).json({ error: 'Batas ukuran per perangkat (500 MB) terlampaui.' });
     }
 
     const now = Date.now();
